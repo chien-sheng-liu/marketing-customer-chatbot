@@ -35,7 +35,7 @@ Frontend calls the backend via `/api`. Override with `VITE_API_BASE_URL` in `fro
 
 訪問 `http://localhost:3006/documents` 或在 Agent 介面點 **文件管理**。這個模組呈現產品級的文件庫體驗：
 
-- 支援 `.txt`, `.md`, `.markdown`, `.pdf`, `.docx`, `.xlsx` (上限約 2 MB)。
+- 支援 `.txt`, `.md`, `.markdown`, `.pdf`, `.docx`, `.xlsx`（單檔 20 MB 以內會自動 chunk 與 embedding）。
 - 會自動 chunk + embedding，資料存放在 `backend/storage/`（Docker 會以 volume 保存）。
 - 介面提供上傳、下載、刪除、語意搜尋結果列表。
 - API（前綴 `/api`）

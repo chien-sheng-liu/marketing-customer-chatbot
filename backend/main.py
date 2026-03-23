@@ -7,7 +7,7 @@ from datetime import datetime
 from io import BytesIO
 from pathlib import Path
 from threading import Lock
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
 from dotenv import load_dotenv
@@ -40,14 +40,24 @@ CORS_ORIGINS = os.getenv("CORS_ORIGINS")
 EMBEDDING_MODEL = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
 RAG_CHUNK_SIZE = int(os.getenv("RAG_CHUNK_SIZE", "800"))
 RAG_CHUNK_OVERLAP = int(os.getenv("RAG_CHUNK_OVERLAP", "200"))
-RAG_MAX_FILE_BYTES = int(os.getenv("RAG_MAX_FILE_BYTES", "2000000"))
+RAG_MAX_FILE_BYTES = int(os.getenv("RAG_MAX_FILE_BYTES", str(20 * 1024 * 1024)))
 RAG_ALLOWED_EXTENSIONS = {'.txt', '.md', '.markdown', '.pdf', '.docx', '.xlsx'}
 BASE_DIR = Path(__file__).resolve().parent
 RAG_STORAGE_ROOT = Path(os.getenv("RAG_STORAGE_PATH", str(BASE_DIR / "storage")))
+RAG_STORAGE_ROOT.mkdir(parents=True, exist_ok=True)
+SETTINGS_FILE = RAG_STORAGE_ROOT / "agent_settings.json"
 DEFAULT_WELCOME_MESSAGE = os.getenv(
     "DEFAULT_WELCOME_MESSAGE",
     "歡迎來到 Kamee Growth Desk。請輸入您的會員編號，讓我們個人化您的服務體驗。"
 )
+
+DEFAULT_AGENT_SETTINGS = {
+    "brandName": "Kamee Growth Desk",
+    "greetingLine": "今天想優化哪個體驗呢？",
+    "escalateCopy": "因您的需求涉及進階產品架構，我將為您轉接 Kamee 產品專家，請稍候...",
+    "businessHours": "週一至週五 09:00-18:00",
+    "defaultTags": ["一般客服"],
+}
 
 
 class MessagePayload(BaseModel):
@@ -73,6 +83,14 @@ class ConversationMessagePayload(BaseModel):
     content: str
 
 
+class AgentSettingsPayload(BaseModel):
+    brandName: str = Field(default=DEFAULT_AGENT_SETTINGS["brandName"])
+    greetingLine: str = Field(default=DEFAULT_AGENT_SETTINGS["greetingLine"])
+    escalateCopy: str = Field(default=DEFAULT_AGENT_SETTINGS["escalateCopy"])
+    businessHours: str = Field(default=DEFAULT_AGENT_SETTINGS["businessHours"])
+    defaultTags: List[str] = Field(default_factory=lambda: list(DEFAULT_AGENT_SETTINGS["defaultTags"]))
+
+
 def _build_client() -> Optional[OpenAI]:
     api_key = os.getenv("CHATGPT_API_KEY")
     if not api_key:
@@ -85,7 +103,51 @@ def _build_client() -> Optional[OpenAI]:
 client = _build_client()
 rag_store = RagStore(RAG_STORAGE_ROOT)
 conversation_lock = Lock()
+settings_lock = Lock()
 conversations: Dict[str, List[Dict[str, str]]] = defaultdict(list)
+
+
+def _read_settings_store() -> Dict[str, Any]:
+    if not SETTINGS_FILE.exists():
+        return {}
+    try:
+        with SETTINGS_FILE.open('r', encoding='utf-8') as handle:
+            return json.load(handle)
+    except json.JSONDecodeError:
+        return {}
+
+
+def _write_settings_store(data: Dict[str, Any]) -> None:
+    SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    temp_file = SETTINGS_FILE.with_suffix('.tmp')
+    with temp_file.open('w', encoding='utf-8') as handle:
+        json.dump(data, handle, ensure_ascii=False, indent=2)
+    temp_file.replace(SETTINGS_FILE)
+
+
+def load_agent_settings(settings_id: str) -> Dict[str, Any]:
+    with settings_lock:
+        all_settings = _read_settings_store()
+        record = all_settings.get(settings_id, {})
+        merged = {**DEFAULT_AGENT_SETTINGS, **record}
+        tags = record.get('defaultTags', DEFAULT_AGENT_SETTINGS['defaultTags'])
+        if not isinstance(tags, list):
+            tags = DEFAULT_AGENT_SETTINGS['defaultTags']
+        merged['defaultTags'] = [tag for tag in tags if isinstance(tag, str)] or DEFAULT_AGENT_SETTINGS['defaultTags']
+        return merged
+
+
+def persist_agent_settings(settings_id: str, payload: 'AgentSettingsPayload') -> Dict[str, Any]:
+    with settings_lock:
+        all_settings = _read_settings_store()
+        record = payload.model_dump()
+        tags = [tag.strip() for tag in record.get('defaultTags', []) if isinstance(tag, str) and tag.strip()]
+        record['defaultTags'] = tags
+        all_settings[settings_id] = record
+        _write_settings_store(all_settings)
+        merged = {**DEFAULT_AGENT_SETTINGS, **record}
+        merged['defaultTags'] = record['defaultTags'] or DEFAULT_AGENT_SETTINGS['defaultTags']
+        return merged
 
 
 def normalize_conversation_id(conversation_id: str) -> str:
@@ -382,7 +444,8 @@ async def upload_rag_document(file: UploadFile = File(...)):
     filename = file.filename or 'document.txt'
     extension = Path(filename).suffix.lower() or '.txt'
     if extension not in RAG_ALLOWED_EXTENSIONS:
-        raise HTTPException(status_code=400, detail="Only .txt and .md files are supported")
+        allowed = ", ".join(sorted(RAG_ALLOWED_EXTENSIONS))
+        raise HTTPException(status_code=400, detail=f"不支援的文件格式。允許：{allowed}")
 
     binary = await file.read()
     if not binary:
@@ -435,6 +498,19 @@ def rag_semantic_search(payload: RagSearchRequest):
 
     matches = get_rag_matches(query, payload.topK)
     return {"matches": matches}
+
+
+@app.get("/api/settings/{settings_id}")
+def get_agent_settings(settings_id: str):
+    normalized = normalize_conversation_id(settings_id)
+    return {"settings": load_agent_settings(normalized)}
+
+
+@app.put("/api/settings/{settings_id}")
+def update_agent_settings(settings_id: str, payload: AgentSettingsPayload):
+    normalized = normalize_conversation_id(settings_id)
+    saved = persist_agent_settings(normalized, payload)
+    return {"settings": saved}
 
 
 @app.get("/api/conversations/{conversation_id}/messages")

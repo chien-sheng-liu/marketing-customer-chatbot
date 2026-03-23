@@ -27,6 +27,14 @@ export interface ConversationMessageDTO {
   timestamp: string;
 }
 
+export interface AgentSettings {
+  brandName: string;
+  greetingLine: string;
+  escalateCopy: string;
+  businessHours: string;
+  defaultTags: string[];
+}
+
 type SerializedMessage = Pick<Message, 'role' | 'content'> & { timestamp?: string };
 
 const serializeHistory = (history: Message[]): SerializedMessage[] =>
@@ -40,11 +48,13 @@ const serializeHistory = (history: Message[]): SerializedMessage[] =>
   });
 
 const handleError = async (response: Response) => {
-  let message = 'Request failed';
+  let message = `Request failed (${response.status})`;
   try {
     const body = await response.json();
-    if (body?.error) {
+    if (typeof body?.error === 'string') {
       message = body.error;
+    } else if (body?.detail) {
+      message = typeof body.detail === 'string' ? body.detail : JSON.stringify(body.detail);
     }
   } catch {
     // Ignore JSON parse errors
@@ -122,6 +132,20 @@ export const downloadRagDocument = async (docId: string): Promise<Blob> => {
 export const searchRag = async (query: string, topK = 3): Promise<RagSearchMatch[]> => {
   const { matches } = await postJson<{ matches: RagSearchMatch[] }>('/rag/search', { query, topK });
   return matches;
+};
+
+export const fetchAgentSettings = async (settingsId: string): Promise<AgentSettings> => {
+  const { settings } = await requestJson<{ settings: AgentSettings }>(`/settings/${settingsId}`);
+  return settings;
+};
+
+export const saveAgentSettings = async (settingsId: string, payload: AgentSettings): Promise<AgentSettings> => {
+  const { settings } = await requestJson<{ settings: AgentSettings }>(`/settings/${settingsId}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  });
+  return settings;
 };
 
 export const fetchConversationMessages = async (conversationId: string): Promise<ConversationMessageDTO[]> => {
