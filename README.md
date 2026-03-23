@@ -1,8 +1,6 @@
-Growth Desk — Productizing the AI 客戶體驗
+# Kamee Growth Desk — Productizing the AI 客戶體驗
 
-Growth Desk 把原本 demo 型的客服範例升級成一個可端到端體驗的產品原型。它把 AI 聊天、知識管理、與營運洞察包成單一介面，讓團隊可以直接想像上線後的樣子，而不只是技術展示。
-
-> View the published AI Studio app: https://ai.studio/apps/drive/1jOEWrS9ZghcYCls2j9HGZOLcWc0dIYjN
+Kamee Growth Desk 把原本 demo 型的客服範例升級成一個可端到端體驗的產品原型。它把 AI 聊天、知識管理、與營運洞察包成單一介面，讓團隊可以直接想像上線後的樣子，而不只是技術展示。
 
 ## Product Pillars
 
