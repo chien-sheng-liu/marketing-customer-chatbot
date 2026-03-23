@@ -1,0 +1,28 @@
+{
+  "name": "kamee-growth-desk",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev:agent": "vite --config vite.agent.config.ts",
+    "dev:customer": "vite --config vite.customer.config.ts",
+    "dev": "npm run dev:agent",
+    "build:agent": "vite build --config vite.agent.config.ts",
+    "build:customer": "vite build --config vite.customer.config.ts",
+    "build": "npm run build:agent && npm run build:customer",
+    "preview:agent": "vite preview --config vite.agent.config.ts",
+    "preview:customer": "vite preview --config vite.customer.config.ts",
+    "preview": "npm run preview:agent"
+  },
+  "dependencies": {
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
+    "react-router-dom": "^7.0.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.14.0",
+    "@vitejs/plugin-react": "^5.0.0",
+    "typescript": "~5.8.2",
+    "vite": "^6.2.0"
+  }
+}

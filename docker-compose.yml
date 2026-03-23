@@ -1,0 +1,37 @@
+services:
+  backend:
+    build:
+      context: ./backend
+    env_file:
+      - ${BACKEND_ENV_FILE:-backend/.env.local}
+    environment:
+      PORT: ${BACKEND_PORT:-4000}
+    ports:
+      - "${BACKEND_PORT:-4000}:4000"
+    volumes:
+      - ./backend/storage:/app/storage
+  frontend-customer:
+    build:
+      context: ./frontend
+      args:
+        APP_TARGET: customer
+    depends_on:
+      - backend
+    environment:
+      VITE_API_BASE_URL: /api
+      VITE_DEV_API_PROXY: http://backend:4000
+    ports:
+      - "${CUSTOMER_PORT:-3005}:3005"
+
+  frontend-agent:
+    build:
+      context: ./frontend
+      args:
+        APP_TARGET: agent
+    depends_on:
+      - backend
+    environment:
+      VITE_API_BASE_URL: /api
+      VITE_DEV_API_PROXY: http://backend:4000
+    ports:
+      - "${AGENT_PORT:-3006}:3006"
