@@ -1,4 +1,5 @@
 import { ConversationAnalysis, Message, Role } from '../types';
+import { tokenStore } from './tokenStore';
 
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || '/api').replace(/\/$/, '');
 
@@ -27,12 +28,49 @@ export interface ConversationMessageDTO {
   timestamp: string;
 }
 
+export interface ConversationSummary {
+  id: string;
+  displayName: string;
+  status: string;
+  createdAt: string;
+  lastMessageAt?: string | null;
+  lastMessage?: string | null;
+}
+
+export interface CannedResponse {
+  id: string;
+  title: string;
+  content: string;
+  createdAt: string;
+}
+
 export interface AgentSettings {
   brandName: string;
   greetingLine: string;
   escalateCopy: string;
   businessHours: string;
   defaultTags: string[];
+}
+
+export interface MemberProfile {
+  memberId: string;
+  name: string;
+  email: string;
+  phone?: string | null;
+  tier?: string | null;
+  city?: string | null;
+  status?: string | null;
+  joinedAt: string;
+}
+
+export interface MemberPurchase {
+  id: string;
+  productName: string;
+  amount: number;
+  currency: string;
+  channel?: string | null;
+  purchasedAt: string;
+  notes?: string | null;
 }
 
 type SerializedMessage = Pick<Message, 'role' | 'content'> & { timestamp?: string };
@@ -63,7 +101,16 @@ const handleError = async (response: Response) => {
 };
 
 const requestJson = async <T>(path: string, init: RequestInit = {}): Promise<T> => {
-  const response = await fetch(`${API_BASE_URL}${path}`, init);
+  const token = tokenStore.get();
+  const headers: Record<string, string> = {
+    ...(init.headers as Record<string, string> ?? {}),
+  };
+  if (token) headers['Authorization'] = `Bearer ${token}`;
+  const response = await fetch(`${API_BASE_URL}${path}`, {
+    ...init,
+    credentials: 'include',
+    headers,
+  });
   if (!response.ok) {
     await handleError(response);
   }
@@ -146,6 +193,110 @@ export const saveAgentSettings = async (settingsId: string, payload: AgentSettin
     body: JSON.stringify(payload)
   });
   return settings;
+};
+
+export const fetchMemberProfile = async (memberId: string): Promise<MemberProfile> => {
+  const { member } = await requestJson<{ member: MemberProfile }>(`/members/${memberId}`);
+  return member;
+};
+
+export const fetchMemberPurchases = async (memberId: string, limit = 25): Promise<MemberPurchase[]> => {
+  const params = new URLSearchParams({ limit: String(limit) });
+  const { purchases } = await requestJson<{ purchases: MemberPurchase[] }>(
+    `/members/${memberId}/purchases?${params.toString()}`
+  );
+  return purchases;
+};
+
+export const listConversations = async (): Promise<ConversationSummary[]> => {
+  const { conversations } = await requestJson<{ conversations: ConversationSummary[] }>('/conversations');
+  return conversations;
+};
+
+export const createConversation = async (displayName?: string): Promise<ConversationSummary> => {
+  return postJson<ConversationSummary>('/conversations', { displayName: displayName || '' });
+};
+
+export const deleteConversation = async (conversationId: string): Promise<void> => {
+  await deleteJson(`/conversations/${conversationId}`);
+};
+
+export const updateConversationStatus = async (conversationId: string, status: string): Promise<void> => {
+  await requestJson(`/conversations/${conversationId}/status`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ status }),
+  });
+};
+
+export const listCannedResponses = async (): Promise<CannedResponse[]> => {
+  const { responses } = await requestJson<{ responses: CannedResponse[] }>('/canned-responses');
+  return responses;
+};
+
+export const createCannedResponse = async (title: string, content: string): Promise<CannedResponse> => {
+  return postJson<CannedResponse>('/canned-responses', { title, content });
+};
+
+export const deleteCannedResponse = async (id: string): Promise<void> => {
+  await deleteJson(`/canned-responses/${id}`);
+};
+
+// ---------------------------------------------------------------------------
+// User management (admin only)
+// ---------------------------------------------------------------------------
+
+export interface UserDTO {
+  id: string;
+  email: string;
+  name: string;
+  role: 'admin' | 'agent';
+  isActive: boolean;
+  createdAt: string;
+}
+
+export const listUsers = async (): Promise<UserDTO[]> => {
+  return requestJson<UserDTO[]>('/users');
+};
+
+export const createUser = async (payload: {
+  email: string;
+  name: string;
+  password: string;
+  role: 'admin' | 'agent';
+}): Promise<UserDTO> => {
+  return postJson<UserDTO>('/users', payload);
+};
+
+export const updateUser = async (
+  userId: string,
+  payload: { name?: string; role?: 'admin' | 'agent'; is_active?: boolean }
+): Promise<UserDTO> => {
+  return requestJson<UserDTO>(`/users/${userId}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+};
+
+export const resetUserPassword = async (userId: string, newPassword: string): Promise<void> => {
+  await requestJson(`/users/${userId}/password`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ new_password: newPassword }),
+  });
+};
+
+export const changeMyPassword = async (currentPassword: string, newPassword: string): Promise<void> => {
+  await requestJson('/auth/change-password', {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }),
+  });
+};
+
+export const createKbEntry = async (title: string, content: string): Promise<RagDocumentSummary> => {
+  return postJson<RagDocumentSummary>('/rag/entries', { title, content });
 };
 
 export const fetchConversationMessages = async (conversationId: string): Promise<ConversationMessageDTO[]> => {

@@ -1,4 +1,15 @@
 services:
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: ${DB_USER:-db_admin}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-db_password}
+      POSTGRES_DB: ${DB_NAME:-marketing_tools}
+    ports:
+      - "${POSTGRES_PORT:-8002}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
   backend:
     build:
       context: ./backend
@@ -6,8 +17,15 @@ services:
       - ${BACKEND_ENV_FILE:-backend/.env.local}
     environment:
       PORT: ${BACKEND_PORT:-4000}
+      DB_HOST: ${DB_HOST:-postgres}
+      DB_PORT: ${DB_INTERNAL_PORT:-5432}
+      DB_USER: ${DB_USER:-db_admin}
+      DB_PASSWORD: ${DB_PASSWORD:-db_password}
+      DB_NAME: ${DB_NAME:-marketing_tools}
     ports:
       - "${BACKEND_PORT:-4000}:4000"
+    depends_on:
+      - postgres
     volumes:
       - ./backend/storage:/app/storage
   frontend-customer:
@@ -35,3 +53,6 @@ services:
       VITE_DEV_API_PROXY: http://backend:4000
     ports:
       - "${AGENT_PORT:-3006}:3006"
+
+volumes:
+  postgres-data:

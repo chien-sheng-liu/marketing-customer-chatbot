@@ -1,28 +1,34 @@
-import json
+"""Application entry point.
+
+Responsibilities:
+- Load environment variables
+- Configure logging
+- Create FastAPI app and attach CORS middleware
+- Mount all routers under /api
+"""
+from __future__ import annotations
+
 import logging
-import math
 import os
-from collections import defaultdict
-from datetime import datetime
-from io import BytesIO
-from pathlib import Path
-from threading import Lock
-from typing import Any, Dict, List, Optional
-from uuid import uuid4
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
-from openpyxl import load_workbook
-from openai import OpenAI
-from pypdf import PdfReader
-from docx import Document
-from pydantic import BaseModel, Field
 
-from knowledge_base import KNOWLEDGE_BASE
-from rag_store import RagStore, chunk_text
+from db import count_users, create_user, init_db
+from routers.analysis import router as analysis_router
+from routers.auth import router as auth_router
+from routers.canned_responses import router as canned_router
+from routers.conversation import router as conversation_router
+from routers.member import router as member_router
+from routers.rag import router as rag_router
+from routers.settings_router import router as settings_router
+from routers.users import router as users_router
+from services.auth_service import hash_password
 
+# ---------------------------------------------------------------------------
+# Environment & logging
+# ---------------------------------------------------------------------------
 
 load_dotenv(dotenv_path=".env.local")
 load_dotenv()
@@ -32,132 +38,18 @@ logging.basicConfig(
     level=getattr(logging, LOG_LEVEL, logging.INFO),
     format="%(asctime)s %(levelname)s [backend] %(message)s",
 )
-logger = logging.getLogger("marketing_tools.backend")
+logger = logging.getLogger("marketing_tools.main")
 
 PORT = int(os.getenv("PORT", "4000"))
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-CORS_ORIGINS = os.getenv("CORS_ORIGINS")
-EMBEDDING_MODEL = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
-RAG_CHUNK_SIZE = int(os.getenv("RAG_CHUNK_SIZE", "800"))
-RAG_CHUNK_OVERLAP = int(os.getenv("RAG_CHUNK_OVERLAP", "200"))
-RAG_MAX_FILE_BYTES = int(os.getenv("RAG_MAX_FILE_BYTES", str(20 * 1024 * 1024)))
-RAG_ALLOWED_EXTENSIONS = {'.txt', '.md', '.markdown', '.pdf', '.docx', '.xlsx'}
-BASE_DIR = Path(__file__).resolve().parent
-RAG_STORAGE_ROOT = Path(os.getenv("RAG_STORAGE_PATH", str(BASE_DIR / "storage")))
-RAG_STORAGE_ROOT.mkdir(parents=True, exist_ok=True)
-SETTINGS_FILE = RAG_STORAGE_ROOT / "agent_settings.json"
-DEFAULT_WELCOME_MESSAGE = os.getenv(
-    "DEFAULT_WELCOME_MESSAGE",
-    "歡迎來到 Kamee Growth Desk。請輸入您的會員編號，讓我們個人化您的服務體驗。"
-)
+CORS_ORIGINS = os.getenv("CORS_ORIGINS", "")
 
-DEFAULT_AGENT_SETTINGS = {
-    "brandName": "Kamee Growth Desk",
-    "greetingLine": "今天想優化哪個體驗呢？",
-    "escalateCopy": "因您的需求涉及進階產品架構，我將為您轉接 Kamee 產品專家，請稍候...",
-    "businessHours": "週一至週五 09:00-18:00",
-    "defaultTags": ["一般客服"],
-}
+# ---------------------------------------------------------------------------
+# App
+# ---------------------------------------------------------------------------
 
+app = FastAPI(title="Customer Service Bot API", version="1.0.0")
 
-class MessagePayload(BaseModel):
-    role: Optional[str] = None
-    content: str
-
-
-class AnalyzeRequest(BaseModel):
-    history: List[MessagePayload] = Field(default_factory=list)
-
-
-class KnowledgeBaseRequest(BaseModel):
-    query: str = Field(min_length=1)
-
-
-class RagSearchRequest(BaseModel):
-    query: str = Field(min_length=1)
-    topK: int = Field(default=3, ge=1, le=10)
-
-
-class ConversationMessagePayload(BaseModel):
-    role: str
-    content: str
-
-
-class AgentSettingsPayload(BaseModel):
-    brandName: str = Field(default=DEFAULT_AGENT_SETTINGS["brandName"])
-    greetingLine: str = Field(default=DEFAULT_AGENT_SETTINGS["greetingLine"])
-    escalateCopy: str = Field(default=DEFAULT_AGENT_SETTINGS["escalateCopy"])
-    businessHours: str = Field(default=DEFAULT_AGENT_SETTINGS["businessHours"])
-    defaultTags: List[str] = Field(default_factory=lambda: list(DEFAULT_AGENT_SETTINGS["defaultTags"]))
-
-
-def _build_client() -> Optional[OpenAI]:
-    api_key = os.getenv("CHATGPT_API_KEY")
-    if not api_key:
-        logger.warning("CHATGPT_API_KEY is not set. API routes will fail until configured.")
-        return None
-    logger.info("OpenAI client initialized with model %s", OPENAI_MODEL)
-    return OpenAI(api_key=api_key)
-
-
-client = _build_client()
-rag_store = RagStore(RAG_STORAGE_ROOT)
-conversation_lock = Lock()
-settings_lock = Lock()
-conversations: Dict[str, List[Dict[str, str]]] = defaultdict(list)
-
-
-def _read_settings_store() -> Dict[str, Any]:
-    if not SETTINGS_FILE.exists():
-        return {}
-    try:
-        with SETTINGS_FILE.open('r', encoding='utf-8') as handle:
-            return json.load(handle)
-    except json.JSONDecodeError:
-        return {}
-
-
-def _write_settings_store(data: Dict[str, Any]) -> None:
-    SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    temp_file = SETTINGS_FILE.with_suffix('.tmp')
-    with temp_file.open('w', encoding='utf-8') as handle:
-        json.dump(data, handle, ensure_ascii=False, indent=2)
-    temp_file.replace(SETTINGS_FILE)
-
-
-def load_agent_settings(settings_id: str) -> Dict[str, Any]:
-    with settings_lock:
-        all_settings = _read_settings_store()
-        record = all_settings.get(settings_id, {})
-        merged = {**DEFAULT_AGENT_SETTINGS, **record}
-        tags = record.get('defaultTags', DEFAULT_AGENT_SETTINGS['defaultTags'])
-        if not isinstance(tags, list):
-            tags = DEFAULT_AGENT_SETTINGS['defaultTags']
-        merged['defaultTags'] = [tag for tag in tags if isinstance(tag, str)] or DEFAULT_AGENT_SETTINGS['defaultTags']
-        return merged
-
-
-def persist_agent_settings(settings_id: str, payload: 'AgentSettingsPayload') -> Dict[str, Any]:
-    with settings_lock:
-        all_settings = _read_settings_store()
-        record = payload.model_dump()
-        tags = [tag.strip() for tag in record.get('defaultTags', []) if isinstance(tag, str) and tag.strip()]
-        record['defaultTags'] = tags
-        all_settings[settings_id] = record
-        _write_settings_store(all_settings)
-        merged = {**DEFAULT_AGENT_SETTINGS, **record}
-        merged['defaultTags'] = record['defaultTags'] or DEFAULT_AGENT_SETTINGS['defaultTags']
-        return merged
-
-
-def normalize_conversation_id(conversation_id: str) -> str:
-    normalized = conversation_id.strip().lower() if conversation_id else 'default'
-    return normalized or 'default'
-
-app = FastAPI()
-
-origins = [origin.strip() for origin in (CORS_ORIGINS or "").split(",") if origin.strip()]
-
+origins = [o.strip() for o in CORS_ORIGINS.split(",") if o.strip()]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins or ["*"],
@@ -166,171 +58,40 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# ---------------------------------------------------------------------------
+# Startup
+# ---------------------------------------------------------------------------
 
-def ensure_client() -> OpenAI:
-    if not client:
-        raise HTTPException(status_code=500, detail="CHATGPT_API_KEY is not configured")
-    return client
+init_db()
+logger.info("Database initialised")
 
+# Seed first admin account if no users exist yet
+_DEFAULT_ADMIN_EMAIL = "admin@example.com"
+_DEFAULT_ADMIN_PASSWORD = "changeme123"
 
-def format_conversation(history: List[MessagePayload]) -> str:
-    if not history:
-        return ""
-    return "\n".join(
-        f"{'Customer' if msg.role == 'user' else 'Agent'}: {msg.content}"
-        for msg in history
+if count_users() == 0:
+    create_user(
+        email=_DEFAULT_ADMIN_EMAIL,
+        name="Admin",
+        password_hash=hash_password(_DEFAULT_ADMIN_PASSWORD),
+        role="admin",
     )
+    logger.info("Seeded initial admin user: %s (請登入後立即修改密碼)", _DEFAULT_ADMIN_EMAIL)
+else:
+    logger.debug("Users table already seeded, skipping admin seed")
 
+# ---------------------------------------------------------------------------
+# Routes
+# ---------------------------------------------------------------------------
 
-def _decode_text(binary: bytes) -> str:
-    try:
-        return binary.decode('utf-8')
-    except UnicodeDecodeError:
-        return binary.decode('utf-8', errors='ignore')
-
-
-def extract_document_text(filename: str, binary: bytes) -> str:
-    extension = Path(filename).suffix.lower()
-    if extension in {'.txt', '.md', '.markdown'}:
-        return _decode_text(binary)
-
-    buffer = BytesIO(binary)
-
-    try:
-        if extension == '.pdf':
-            reader = PdfReader(buffer)
-            texts = [(page.extract_text() or '').strip() for page in reader.pages]
-            return '\n'.join(filter(None, texts)).strip()
-
-        if extension == '.docx':
-            document = Document(buffer)
-            texts = [paragraph.text.strip() for paragraph in document.paragraphs if paragraph.text.strip()]
-            return '\n'.join(texts).strip()
-
-        if extension == '.xlsx':
-            workbook = load_workbook(buffer, read_only=True, data_only=True)
-            rows: List[str] = []
-            for sheet in workbook.worksheets:
-                rows.append(f"# Sheet: {sheet.title}")
-                for row in sheet.iter_rows(values_only=True):
-                    values = [str(cell).strip() for cell in row if cell not in (None, '')]
-                    if values:
-                        rows.append(' | '.join(values))
-            workbook.close()
-            return '\n'.join(rows).strip()
-    except Exception as error:
-        logger.exception("Failed to parse document %s", filename)
-        if extension == '.pdf' and 'DependencyError' in str(error):
-            raise HTTPException(status_code=400, detail="此 PDF 使用受支援的加密方式，請解除密碼保護後再上傳") from error
-        raise HTTPException(status_code=400, detail="無法解析上傳的文件內容") from error
-
-    raise HTTPException(status_code=400, detail="不支援的文件格式")
-
-
-def embed_texts(texts: List[str]) -> List[List[float]]:
-    if not texts:
-        return []
-    try:
-        response = ensure_client().embeddings.create(model=EMBEDDING_MODEL, input=texts)
-        return [record.embedding for record in response.data]
-    except Exception as error:
-        logger.exception("Embedding request failed")
-        raise HTTPException(status_code=502, detail="Failed to embed text") from error
-
-
-def cosine_similarity(a: List[float], b: List[float]) -> float:
-    if not a or not b:
-        return 0.0
-    dot_product = sum(x * y for x, y in zip(a, b))
-    norm_a = math.sqrt(sum(x * x for x in a))
-    norm_b = math.sqrt(sum(y * y for y in b))
-    if not norm_a or not norm_b:
-        return 0.0
-    return dot_product / (norm_a * norm_b)
-
-
-def get_rag_matches(query: str, top_k: int) -> List[dict]:
-    query = query.strip()
-    if not query:
-        return []
-
-    chunk_records = rag_store.load_chunk_records()
-    if not chunk_records:
-        return []
-
-    query_embedding = embed_texts([query])
-    if not query_embedding:
-        return []
-
-    scored = []
-    for record in chunk_records:
-        embedding = record.get('embedding')
-        if not embedding:
-            continue
-        score = cosine_similarity(query_embedding[0], embedding)
-        scored.append({
-            'docId': record.get('docId'),
-            'filename': record.get('originalName'),
-            'snippet': record.get('text', '')[:800],
-            'score': round(score, 4),
-        })
-
-    scored.sort(key=lambda item: item['score'], reverse=True)
-    return scored[:top_k]
-
-
-def get_conversation_messages(conversation_id: str) -> List[Dict[str, str]]:
-    conv_id = normalize_conversation_id(conversation_id)
-    with conversation_lock:
-        thread_messages = conversations.get(conv_id)
-        if not thread_messages:
-            message = {
-                'id': uuid4().hex,
-                'role': 'assistant',
-                'content': DEFAULT_WELCOME_MESSAGE,
-                'timestamp': datetime.utcnow().isoformat()
-            }
-            conversations[conv_id] = [message]
-            thread_messages = conversations[conv_id]
-        return list(thread_messages)
-
-
-def append_conversation_message(conversation_id: str, role: str, content: str) -> Dict[str, str]:
-    conv_id = normalize_conversation_id(conversation_id)
-    message = {
-        'id': uuid4().hex,
-        'role': role,
-        'content': content,
-        'timestamp': datetime.utcnow().isoformat()
-    }
-    with conversation_lock:
-        conversations[conv_id].append(message)
-    return message
-
-
-def run_completion(system_prompt: str, user_prompt: str, *, temperature: float = 0.2, json_mode: bool = False) -> str:
-    kwargs: dict = {
-        "model": OPENAI_MODEL,
-        "temperature": temperature,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-    }
-
-    if json_mode:
-        kwargs["response_format"] = {"type": "json_object"}
-
-    try:
-        response = ensure_client().chat.completions.create(**kwargs)
-    except Exception as error:
-        logger.exception("ChatGPT request failed (json_mode=%s)", json_mode)
-        raise HTTPException(status_code=502, detail="Failed to contact ChatGPT API") from error
-
-    content = response.choices[0].message.content
-    if not content:
-        raise HTTPException(status_code=502, detail="No response content from ChatGPT")
-    return content
+app.include_router(auth_router, prefix="/api/auth")
+app.include_router(analysis_router, prefix="/api")
+app.include_router(rag_router, prefix="/api/rag")
+app.include_router(settings_router, prefix="/api/settings")
+app.include_router(conversation_router, prefix="/api/conversations")
+app.include_router(canned_router, prefix="/api/canned-responses")
+app.include_router(member_router, prefix="/api/members")
+app.include_router(users_router, prefix="/api/users")
 
 
 @app.get("/health")
@@ -338,196 +99,9 @@ def health_check():
     return {"status": "ok"}
 
 
-@app.post("/api/analyze")
-def analyze_conversation(payload: AnalyzeRequest):
-    conversation_text = format_conversation(payload.history)
-    last_user_message = next(
-        (msg.content for msg in reversed(payload.history) if (msg.role or '').lower() == 'user'),
-        ''
-    )
-    rag_matches = get_rag_matches(last_user_message, top_k=3) if last_user_message else []
-    rag_context = ""
-    if rag_matches:
-        rag_lines = [
-            "ADDITIONAL DOC SNIPPETS (use these for accurate answers):"
-        ]
-        for idx, match in enumerate(rag_matches, start=1):
-            rag_lines.append(
-                f"{idx}. Source: {match['filename']} | Score: {match['score']}\n{match['snippet']}"
-            )
-        rag_context = "\n".join(rag_lines)
-
-    prompt = f"""You are an AI assistant that supports a Taiwanese ecommerce customer-service lead.
-Use ONLY the internal knowledge base below to reason about the latest conversation.
-
-INTERNAL KNOWLEDGE BASE:
-{KNOWLEDGE_BASE}
-
-{rag_context if rag_context else ''}
-
-CONVERSATION HISTORY:
-{conversation_text}
-
-Return a valid JSON object with the following fields:
-{{
-  \"tags\": array of strings,
-  \"sentiment\": one of \"positive\", \"neutral\", \"negative\", \"angry\",
-  \"routing\": one of \"none\", \"dietitian\", \"senior_agent\", \"risk_alert\",
-  \"suggestedReply\": string written in Traditional Chinese without Markdown,
-  \"upsellOpportunity\": {{ \"detected\": boolean, \"suggestion\": string }},
-  \"reasoning\": short Traditional Chinese explanation without Markdown
-}}
-
-Answer in JSON ONLY."""
-
-    try:
-        raw = run_completion(
-            "You are an AI copilot for a Taiwanese CS lead. ALWAYS respond with strict JSON and avoid Markdown.",
-            prompt,
-            json_mode=True,
-        )
-        return json.loads(raw)
-    except json.JSONDecodeError as error:
-        logger.exception("Invalid JSON returned by ChatGPT: %s", raw)
-        raise HTTPException(status_code=502, detail="Invalid JSON returned by ChatGPT") from error
-
-
-@app.post("/api/kb-query")
-def query_knowledge_base(payload: KnowledgeBaseRequest):
-    prompt = f"""You are an internal SOP search bot.
-Answer strictly based on the knowledge base below.
-
-INTERNAL SOPs:
-{KNOWLEDGE_BASE}
-
-Agent question: {payload.query}
-
-Instructions:
-1. Reply in Traditional Chinese using only plain text.
-2. If the answer is not covered, be honest about it."""
-
-    result = run_completion(
-        "You answer SOP questions in Traditional Chinese plain text.",
-        prompt,
-    )
-    return {"result": result}
-
-
-@app.post("/api/report")
-def generate_daily_report():
-    prompt = """請為客服主管生成一份簡潔的「每日營運洞察報告」。
-假設今天的趨勢如下：
-- 因颱風延遲，物流相關查詢增加 30%。
-- 關於「鎂複方 (Magnesium Complex)」庫存的詢問偏多。
-- 有 2 起關於「取消訂閱按鈕失效」的憤怒客訴。
-
-格式要求：
-1. 使用繁體中文撰寫。
-2. 使用純文字，允許以 - 作為項目符號。
-3. 結構包含：流量與情緒總覽、主要議題、策略與銷售機會、明日行動建議。
-"""
-
-    report = run_completion(
-        "You summarize CS insights in Traditional Chinese plain text.",
-        prompt,
-    )
-    return {"report": report}
-
-
-@app.get("/api/rag/documents")
-def list_rag_documents():
-    return rag_store.list_documents()
-
-
-@app.post("/api/rag/documents")
-async def upload_rag_document(file: UploadFile = File(...)):
-    filename = file.filename or 'document.txt'
-    extension = Path(filename).suffix.lower() or '.txt'
-    if extension not in RAG_ALLOWED_EXTENSIONS:
-        allowed = ", ".join(sorted(RAG_ALLOWED_EXTENSIONS))
-        raise HTTPException(status_code=400, detail=f"不支援的文件格式。允許：{allowed}")
-
-    binary = await file.read()
-    if not binary:
-        raise HTTPException(status_code=400, detail="Uploaded file is empty")
-    if len(binary) > RAG_MAX_FILE_BYTES:
-        raise HTTPException(status_code=400, detail="File exceeds the maximum size limit")
-
-    text_content = extract_document_text(filename, binary)
-    if not text_content.strip():
-        raise HTTPException(status_code=400, detail="文件中沒有可用的文字內容")
-    chunks = chunk_text(text_content, size=RAG_CHUNK_SIZE, overlap=RAG_CHUNK_OVERLAP)
-    if not chunks:
-        raise HTTPException(status_code=400, detail="Unable to extract text chunks from the file")
-
-    embeddings = embed_texts(chunks)
-    summary = rag_store.save_document(
-        original_name=filename,
-        binary_data=binary,
-        chunk_texts=chunks,
-        embeddings=embeddings,
-        chunk_size=RAG_CHUNK_SIZE,
-        chunk_overlap=RAG_CHUNK_OVERLAP,
-        embedding_model=EMBEDDING_MODEL,
-    )
-    return summary
-
-
-@app.get("/api/rag/documents/{doc_id}/download")
-def download_rag_document(doc_id: str):
-    document = rag_store.get_document_files(doc_id)
-    if not document:
-        raise HTTPException(status_code=404, detail="Document not found")
-    metadata = document['metadata']
-    file_path = document['file_path']
-    return FileResponse(file_path, filename=metadata.get('originalName'), media_type='application/octet-stream')
-
-
-@app.delete("/api/rag/documents/{doc_id}")
-def delete_rag_document(doc_id: str):
-    if not rag_store.delete_document(doc_id):
-        raise HTTPException(status_code=404, detail="Document not found")
-    return {"status": "deleted"}
-
-
-@app.post("/api/rag/search")
-def rag_semantic_search(payload: RagSearchRequest):
-    query = payload.query.strip()
-    if not query:
-        raise HTTPException(status_code=400, detail="Query is required")
-
-    matches = get_rag_matches(query, payload.topK)
-    return {"matches": matches}
-
-
-@app.get("/api/settings/{settings_id}")
-def get_agent_settings(settings_id: str):
-    normalized = normalize_conversation_id(settings_id)
-    return {"settings": load_agent_settings(normalized)}
-
-
-@app.put("/api/settings/{settings_id}")
-def update_agent_settings(settings_id: str, payload: AgentSettingsPayload):
-    normalized = normalize_conversation_id(settings_id)
-    saved = persist_agent_settings(normalized, payload)
-    return {"settings": saved}
-
-
-@app.get("/api/conversations/{conversation_id}/messages")
-def get_conversation(conversation_id: str):
-    conv_id = normalize_conversation_id(conversation_id)
-    return {"messages": get_conversation_messages(conv_id)}
-
-
-@app.post("/api/conversations/{conversation_id}/messages")
-def add_conversation_message(conversation_id: str, payload: ConversationMessagePayload):
-    conv_id = normalize_conversation_id(conversation_id)
-    role = (payload.role or 'user').lower()
-    if role not in {"user", "assistant"}:
-        raise HTTPException(status_code=400, detail="role 必須為 user 或 assistant")
-    message = append_conversation_message(conv_id, role, payload.content)
-    return message
-
+# ---------------------------------------------------------------------------
+# Dev server
+# ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
     import uvicorn

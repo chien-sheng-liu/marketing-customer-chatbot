@@ -6,7 +6,8 @@ import {
   downloadRagDocument,
   listRagDocuments,
   searchRag,
-  uploadRagDocument
+  uploadRagDocument,
+  createKbEntry,
 } from '../services/apiClient';
 import { DownloadIcon, FileIcon, SearchIcon, TrashIcon, UploadIcon } from './Icons';
 
@@ -38,6 +39,10 @@ const RagManager: React.FC<RagManagerProps> = ({ mode = 'documents' }) => {
   const [isSearching, setIsSearching] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const [showEntryForm, setShowEntryForm] = useState(false);
+  const [entryTitle, setEntryTitle] = useState('');
+  const [entryContent, setEntryContent] = useState('');
+  const [isSavingEntry, setIsSavingEntry] = useState(false);
 
   const loadDocuments = async () => {
     try {
@@ -115,6 +120,23 @@ const RagManager: React.FC<RagManagerProps> = ({ mode = 'documents' }) => {
     }
   };
 
+  const handleCreateEntry = async () => {
+    if (!entryTitle.trim() || !entryContent.trim()) return;
+    setIsSavingEntry(true);
+    setError(null);
+    try {
+      await createKbEntry(entryTitle.trim(), entryContent.trim());
+      await loadDocuments();
+      setEntryTitle('');
+      setEntryContent('');
+      setShowEntryForm(false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '新增失敗');
+    } finally {
+      setIsSavingEntry(false);
+    }
+  };
+
   return (
     <div className={mode === 'search' ? 'bg-white rounded-xl shadow-sm border border-gray-200' : 'bg-white rounded-xl p-5 shadow-sm border border-gray-200'}>
       <div className="flex justify-between items-center mb-4">
@@ -122,15 +144,24 @@ const RagManager: React.FC<RagManagerProps> = ({ mode = 'documents' }) => {
           <h3 className="text-sm font-semibold text-gray-500 uppercase tracking-wider">Knowledge Assets</h3>
           <p className="text-xs text-gray-400">即時把 SOP / FAQ 變成 Copilot 可用的知識資產</p>
         </div>
-        <button
-          type="button"
-          onClick={() => fileInputRef.current?.click()}
-          className="flex items-center gap-2 px-3 py-1.5 text-sm font-medium rounded-lg border border-indigo-200 text-indigo-700 hover:bg-indigo-50"
-          disabled={uploading}
-        >
-          <UploadIcon />
-          {uploading ? '上傳中...' : '新增文件'}
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => setShowEntryForm(prev => !prev)}
+            className="flex items-center gap-2 px-3 py-1.5 text-sm font-medium rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50"
+          >
+            + 文字條目
+          </button>
+          <button
+            type="button"
+            onClick={() => fileInputRef.current?.click()}
+            className="flex items-center gap-2 px-3 py-1.5 text-sm font-medium rounded-lg border border-indigo-200 text-indigo-700 hover:bg-indigo-50"
+            disabled={uploading}
+          >
+            <UploadIcon />
+            {uploading ? '上傳中...' : '上傳文件'}
+          </button>
+        </div>
         <input
           ref={fileInputRef}
           type="file"
@@ -142,6 +173,41 @@ const RagManager: React.FC<RagManagerProps> = ({ mode = 'documents' }) => {
 
       {error && (
         <p className="text-sm text-red-500 mb-3">{error}</p>
+      )}
+
+      {showEntryForm && (
+        <div className="mb-4 p-4 border border-dashed border-indigo-200 rounded-xl bg-indigo-50 space-y-2">
+          <p className="text-xs font-semibold text-indigo-700 uppercase tracking-wider">新增文字知識條目</p>
+          <input
+            type="text"
+            value={entryTitle}
+            onChange={e => setEntryTitle(e.target.value)}
+            placeholder="條目標題（例如：退換貨政策）"
+            className="w-full px-3 py-2 border border-indigo-200 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 outline-none bg-white"
+          />
+          <textarea
+            value={entryContent}
+            onChange={e => setEntryContent(e.target.value)}
+            placeholder="輸入知識內容、SOP 或 FAQ..."
+            rows={4}
+            className="w-full px-3 py-2 border border-indigo-200 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 outline-none resize-none bg-white"
+          />
+          <div className="flex gap-2 justify-end">
+            <button
+              onClick={() => setShowEntryForm(false)}
+              className="px-3 py-1.5 text-sm border border-gray-200 rounded-lg text-gray-500 hover:bg-white"
+            >
+              取消
+            </button>
+            <button
+              onClick={handleCreateEntry}
+              disabled={isSavingEntry || !entryTitle.trim() || !entryContent.trim()}
+              className="px-4 py-1.5 text-sm bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50"
+            >
+              {isSavingEntry ? '儲存中...' : '儲存並嵌入'}
+            </button>
+          </div>
+        </div>
       )}
 
       {mode === 'documents' && (
